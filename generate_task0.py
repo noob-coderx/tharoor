@@ -40,18 +40,25 @@ def load_model(model_name: str, hf_token: str, device: str) -> Tuple[AutoTokeniz
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        use_auth_token=hf_token,
-        torch_dtype=torch.float16 if "cuda" in device else torch.float32,
-        device_map="auto" if "cuda" in device else None
-    )
-    model.to(device)
-    model.eval()
-    eos_id = tokenizer.eos_token_id
-    if eos_id is None:
-        eos_id = tokenizer.pad_token_id
 
+    if "cuda" in device:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            use_auth_token=hf_token,
+            torch_dtype=torch.float16,
+            device_map="auto",
+            low_cpu_mem_usage=True
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            use_auth_token=hf_token,
+            torch_dtype=torch.float32
+        )
+        model.to("cpu")
+
+    model.eval()
+    eos_id = tokenizer.eos_token_id or tokenizer.pad_token_id
     return tokenizer, model, eos_id
     
 
