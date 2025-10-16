@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"I wrote some stuff"
+"I wrote some stuff for real"
 """
 Task 0: Baseline Decoding Methods for Text Generation
 
