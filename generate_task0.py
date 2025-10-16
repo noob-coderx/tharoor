@@ -34,7 +34,26 @@ def load_model(model_name: str, hf_token: str, device: str) -> Tuple[AutoTokeniz
             - model (AutoModelForCausalLM): Model in evaluation mode, placed on specified device  
             - eos_id (int): End-of-sequence token ID for generation termination
     """
-    raise NotImplementedError("Students must implement this function.")
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        use_auth_token=hf_token
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        use_auth_token=hf_token,
+        torch_dtype=torch.float16 if "cuda" in device else torch.float32,
+        device_map="auto" if "cuda" in device else None
+    )
+    model.to(device)
+    model.eval()
+    eos_id = tokenizer.eos_token_id
+    if eos_id is None:
+        eos_id = tokenizer.pad_token_id
+
+    return tokenizer, model, eos_id
+    
 
 @torch.no_grad()
 def greedy_decode(tokenizer, model, prefix: str, max_new: int, eos_id: int) -> str:
@@ -51,7 +70,19 @@ def greedy_decode(tokenizer, model, prefix: str, max_new: int, eos_id: int) -> s
         str: Generated text continuation (excluding input prefix)
     """
     
-    raise NotImplementedError("Students must implement this function.")
+    input_ids = tokenizer(prefix, return_tensors="pt").input_ids.to(model.device)
+    generated = input_ids.clone()
+    for _ in range(max_new):
+        outputs = model(generated)
+        logits = outputs.logits
+        next_token_logits = logits[:, -1, :]
+        next_token_id = torch.argmax(next_token_logits, dim=-1)
+        generated = torch.cat([generated, next_token_id.unsqueeze(-1)], dim=-1)
+        if next_token_id.item() == eos_id:
+            break
+    continuation_ids = generated[0, input_ids.shape[1]:]  
+    continuation_text = tokenizer.decode(continuation_ids, skip_special_tokens=True)
+    return continuation_text
 
 @torch.no_grad()
 def temperature_decode(tokenizer, model, prefix: str, max_new: int, eos_id: int, tau: float) -> str:
@@ -68,7 +99,24 @@ def temperature_decode(tokenizer, model, prefix: str, max_new: int, eos_id: int,
     Returns:
         str: Generated text continuation (excluding input prefix)
     """
-    raise NotImplementedError("Students must implement this function.")
+    input_ids = tokenizer(prefix, return_tensors="pt").input_ids.to(model.device)
+    generated = input_ids.clone()
+    for _ in range(max_new):
+        outputs = model(generated)
+        logits = outputs.logits
+        next_token_logits = logits[:, -1, :]  
+        max_logit = torch.max(next_token_logits, dim=-1, keepdim=True).values
+        shifted_logits = (next_token_logits - max_logit) / tau
+        exp_logits = torch.exp(shifted_logits)
+        probs = exp_logits / torch.sum(exp_logits, dim=-1, keepdim=True)
+        next_token_id = torch.multinomial(probs, num_samples=1)
+        generated = torch.cat([generated, next_token_id], dim=-1)
+        if next_token_id.item() == eos_id:
+            break
+    continuation_ids = generated[0, input_ids.shape[1]:]
+    continuation_text = tokenizer.decode(continuation_ids, skip_special_tokens=True)
+
+    return continuation_text
 
 @torch.no_grad()
 def topk_decode(tokenizer, model, prefix: str, max_new: int, eos_id: int, k: int) -> str:
@@ -85,5 +133,24 @@ def topk_decode(tokenizer, model, prefix: str, max_new: int, eos_id: int, k: int
     Returns:
         str: Generated text continuation (excluding input prefix)
     """
-    raise NotImplementedError("Students must implement this function.")
+    input_ids = tokenizer(prefix, return_tensors="pt").input_ids.to(model.device)
+    generated = input_ids.clone()
+    for _ in range(max_new):
+        outputs = model(generated)
+        logits = outputs.logits
+        next_token_logits = logits[:, -1, :]  
+        topk_values, topk_indices = torch.topk(next_token_logits, k, dim=-1)
+        max_logit = topk_values.max(dim=-1, keepdim=True).values
+        shifted_topk = topk_values - max_logit
+        exp_topk = torch.exp(shifted_topk)
+        probs_topk = exp_topk / torch.sum(exp_topk, dim=-1, keepdim=True)
+        next_token_id_relative = torch.multinomial(probs_topk, num_samples=1)
+        next_token_id = topk_indices.gather(1, next_token_id_relative)
+        generated = torch.cat([generated, next_token_id], dim=-1)
+        if next_token_id.item() == eos_id:
+            break
+    continuation_ids = generated[0, input_ids.shape[1]:]
+    continuation_text = tokenizer.decode(continuation_ids, skip_special_tokens=True)
+
+    return continuation_text
 
