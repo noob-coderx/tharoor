@@ -136,29 +136,25 @@ def topk_decode_ids(
       gen_ids: List[int] of sampled token ids for the continuation.
     """
     input_ids = tokenizer(prefix, return_tensors="pt").input_ids.to(model.device)
-    gen_ids: List[int] = []
 
-    for _ in range(max_new):
-        outputs = model(input_ids=input_ids)
-        logits = outputs.logits[:, -1, :]  # last step logits
-        probs = torch.softmax(logits, dim=-1)
+    # Use generate with top-k sampling
+    output_ids = model.generate(
+        input_ids,
+        do_sample=True,
+        top_k=k,
+        max_new_tokens=max_new,
+        pad_token_id=tokenizer.eos_token_id,
+        eos_token_id=eos_id
+    )[0]
 
-        # Top-k filtering
-        topk_probs, topk_ids = torch.topk(probs, k, dim=-1)
-        topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True)  # renormalize
+    # Remove prefix part, keep only continuation
+    continuation_ids = output_ids[len(input_ids[0]):].tolist()
 
-        # Sample one from top-k
-        sampled_idx = torch.multinomial(topk_probs, num_samples=1)
-        next_id = topk_ids[0, sampled_idx[0]].item()
+    # If EOS is present, truncate after EOS
+    if eos_id in continuation_ids:
+        continuation_ids = continuation_ids[:continuation_ids.index(eos_id)]
 
-        if next_id == eos_id:
-            break
-
-        gen_ids.append(next_id)
-        # Append new token to input_ids
-        input_ids = torch.cat([input_ids, torch.tensor([[next_id]], device=model.device)], dim=-1)
-
-    return gen_ids
+    return continuation_ids
    
 def importance_sampling_for_prompt(
     tokenizer: AutoTokenizer,
