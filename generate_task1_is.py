@@ -35,7 +35,10 @@ def reward_sum_pos_ids(reward_calc: FastRewardCalculator, tokenizer, ids: List[i
     Output:
         R_sum (float). If len(ids) < 3, return 0.0.
     """
-    raise NotImplementedError("Students must implement this function.")
+    if len(ids) < 3:
+        return 0.0
+    tokens = tokenizer.convert_ids_to_tokens(ids)
+    return reward_calc.calculate_reward_tokens(tokens, normalize=False)
 
 def load_model(model_name: str, hf_token: str, device: str) -> Tuple[AutoTokenizer, AutoModelForCausalLM, int]:
     """Load and configure Hugging Face model components for Sequential Importance Sampling.
@@ -51,7 +54,32 @@ def load_model(model_name: str, hf_token: str, device: str) -> Tuple[AutoTokeniz
             - model: AutoModelForCausalLM in evaluation mode on target device
             - eos_id: End-of-sequence token ID for generation termination
     """
-    raise NotImplementedError("Students must implement this function.")
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        use_auth_token=hf_token
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    if "cuda" in device:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            use_auth_token=hf_token,
+            torch_dtype=torch.float16,
+            device_map="auto",
+            low_cpu_mem_usage=True
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            use_auth_token=hf_token,
+            torch_dtype=torch.float32
+        )
+        model.to("cpu")
+
+    model.eval()
+    eos_id = tokenizer.eos_token_id or tokenizer.pad_token_id
+    return tokenizer, model, eos_id
 
 @torch.no_grad()
 def topk_decode_ids(
@@ -74,7 +102,22 @@ def topk_decode_ids(
     Output:
       gen_ids: List[int] of sampled token ids for the continuation.
     """
-    raise NotImplementedError("Students must implement this function.")
+    input_ids = tokenizer(prefix, return_tensors="pt").input_ids.to(model.device)
+    generated = []
+
+    for _ in range(max_new):
+        outputs = model(input_ids=input_ids)
+        logits = outputs.logits[:, -1, :]  # last token logits
+        topk_vals, topk_idx = torch.topk(logits, k, dim=-1)
+        probs = torch.softmax(topk_vals, dim=-1)
+        next_token = topk_idx[0, torch.multinomial(probs[0], 1)]
+        next_token_id = next_token.item()
+        if next_token_id == eos_id:
+            break
+        generated.append(next_token_id)
+        input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=1)
+
+    return generated
    
 def importance_sampling_for_prompt(
     tokenizer: AutoTokenizer,
@@ -108,4 +151,25 @@ def importance_sampling_for_prompt(
         "normalized_weights": [float, ...]   # length K
       }
     """
-    raise NotImplementedError("Students must implement this function.")
+    samples = []
+    weights = []
+
+    for _ in range(K):
+        cont_ids = topk_decode_ids(
+            tokenizer, model, prefix, max_new_tokens, k, eos_id
+        )
+        full_ids = tokenizer(prefix, return_tensors="pt").input_ids[0].tolist() + cont_ids
+        R = reward_sum_pos_ids(reward_calc, tokenizer, full_ids)
+        w = math.exp(beta * R)
+        text = tokenizer.decode(cont_ids, skip_special_tokens=True)
+        samples.append({"text": text, "weight": w})
+        weights.append(w)
+
+    # Normalize weights
+    total_w = sum(weights)
+    norm_w = [w / total_w for w in weights]
+
+    return {
+        "samples": samples,
+        "normalized_weights": norm_w
+    }

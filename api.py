@@ -32,7 +32,19 @@ class FastRewardCalculator:
             float:
                 Returns 0.0 if fewer than 3 tokens are provided.
         """
-        raise NotImplementedError("Students must implement this function.")
+        n = len(tokens)
+        if n < 3:
+            return 0.0
+
+        total_logp = 0.0
+        for i in range(n - 2):
+            t1, t2, t3 = tokens[i], tokens[i + 1], tokens[i + 2]
+            total_logp += self.token_lm.logp(t1, t2, t3)
+
+        if normalize:
+            total_logp /= (n - 2)
+
+        return total_logp
 
 
 class _TokenLM:
