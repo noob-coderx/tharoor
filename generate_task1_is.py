@@ -37,8 +37,11 @@ def reward_sum_pos_ids(reward_calc: FastRewardCalculator, tokenizer, ids: List[i
     """
     if len(ids) < 3:
         return 0.0
+
+    # Convert ids to tokens
     tokens = tokenizer.convert_ids_to_tokens(ids)
-    return reward_calc.calculate_reward_tokens(tokens, normalize=False)
+    # Compute reward (already normalized inside FastRewardCalculator)
+    return reward_calc.calculate_reward_tokens(tokens, normalize=True)
 
 def load_model(model_name: str, hf_token: str, device: str) -> Tuple[AutoTokenizer, AutoModelForCausalLM, int]:
     """Load and configure Hugging Face model components for Sequential Importance Sampling.
@@ -103,21 +106,29 @@ def topk_decode_ids(
       gen_ids: List[int] of sampled token ids for the continuation.
     """
     input_ids = tokenizer(prefix, return_tensors="pt").input_ids.to(model.device)
-    generated = []
+    gen_ids: List[int] = []
 
     for _ in range(max_new):
         outputs = model(input_ids=input_ids)
-        logits = outputs.logits[:, -1, :]  # last token logits
-        topk_vals, topk_idx = torch.topk(logits, k, dim=-1)
-        probs = torch.softmax(topk_vals, dim=-1)
-        next_token = topk_idx[0, torch.multinomial(probs[0], 1)]
-        next_token_id = next_token.item()
-        if next_token_id == eos_id:
-            break
-        generated.append(next_token_id)
-        input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=1)
+        logits = outputs.logits[:, -1, :]  # last step logits
+        probs = torch.softmax(logits, dim=-1)
 
-    return generated
+        # Top-k filtering
+        topk_probs, topk_ids = torch.topk(probs, k, dim=-1)
+        topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True)  # renormalize
+
+        # Sample one from top-k
+        sampled_idx = torch.multinomial(topk_probs, num_samples=1)
+        next_id = topk_ids[0, sampled_idx[0]].item()
+
+        if next_id == eos_id:
+            break
+
+        gen_ids.append(next_id)
+        # Append new token to input_ids
+        input_ids = torch.cat([input_ids, torch.tensor([[next_id]], device=model.device)], dim=-1)
+
+    return gen_ids
    
 def importance_sampling_for_prompt(
     tokenizer: AutoTokenizer,
@@ -154,22 +165,24 @@ def importance_sampling_for_prompt(
     samples = []
     weights = []
 
+    # Sample K continuations using top-k
     for _ in range(K):
-        cont_ids = topk_decode_ids(
-            tokenizer, model, prefix, max_new_tokens, k, eos_id
-        )
-        full_ids = tokenizer(prefix, return_tensors="pt").input_ids[0].tolist() + cont_ids
-        R = reward_sum_pos_ids(reward_calc, tokenizer, full_ids)
-        w = math.exp(beta * R)
-        text = tokenizer.decode(cont_ids, skip_special_tokens=True)
-        samples.append({"text": text, "weight": w})
+        continuation_ids = topk_decode_ids(tokenizer, model, prefix, max_new_tokens, k, eos_id)
+        full_ids = tokenizer(prefix, return_tensors="pt").input_ids[0].tolist() + continuation_ids
+
+        # compute reward
+        R_x = reward_sum_pos_ids(reward_calc, tokenizer, full_ids)
+        w = math.exp(beta * R_x)
+
+        text_continuation = tokenizer.decode(continuation_ids, skip_special_tokens=True)
+        samples.append({"text": text_continuation, "weight": w})
         weights.append(w)
 
     # Normalize weights
-    total_w = sum(weights)
-    norm_w = [w / total_w for w in weights]
+    total_w = sum(weights) if sum(weights) > 0 else 1.0
+    normalized_weights = [w / total_w for w in weights]
 
     return {
         "samples": samples,
-        "normalized_weights": norm_w
+        "normalized_weights": normalized_weights
     }
