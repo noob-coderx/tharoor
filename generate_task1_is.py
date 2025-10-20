@@ -57,6 +57,10 @@ def load_model(model_name: str, hf_token: str, device: str) -> Tuple[AutoTokeniz
             - model: AutoModelForCausalLM in evaluation mode on target device
             - eos_id: End-of-sequence token ID for generation termination
     """
+    print(f"\n[DEBUG] Loading model: {model_name}")
+    print(f"[DEBUG] Target device: {device}")
+
+    # === Tokenizer ===
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
         use_auth_token=hf_token
@@ -64,7 +68,20 @@ def load_model(model_name: str, hf_token: str, device: str) -> Tuple[AutoTokeniz
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    if "cuda" in device:
+    # === Check CUDA availability ===
+    if torch.cuda.is_available():
+        print("[DEBUG] CUDA is available ✅")
+        print(f"[DEBUG] CUDA device count: {torch.cuda.device_count()}")
+        print(f"[DEBUG] Using device: {torch.cuda.current_device()}")
+        print(f"[DEBUG] Device name: {torch.cuda.get_device_name(0)}")
+        print(f"[DEBUG] Memory allocated (MB): {torch.cuda.memory_allocated(0)/1e6:.2f}")
+        print(f"[DEBUG] Memory reserved (MB): {torch.cuda.memory_reserved(0)/1e6:.2f}")
+    else:
+        print("[DEBUG] ❌ CUDA not available — will run on CPU. This may be very slow.")
+
+    # === Model ===
+    if "cuda" in device and torch.cuda.is_available():
+        print("[DEBUG] Loading model in float16 with device_map='auto' ...")
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             use_auth_token=hf_token,
@@ -73,6 +90,7 @@ def load_model(model_name: str, hf_token: str, device: str) -> Tuple[AutoTokeniz
             low_cpu_mem_usage=True
         )
     else:
+        print("[DEBUG] Loading model on CPU (float32) ...")
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             use_auth_token=hf_token,
@@ -81,7 +99,19 @@ def load_model(model_name: str, hf_token: str, device: str) -> Tuple[AutoTokeniz
         model.to("cpu")
 
     model.eval()
+
+    # === Post-load sanity check ===
+    actual_device = next(model.parameters()).device
+    print(f"[DEBUG] Model successfully loaded on: {actual_device}")
+    if actual_device.type == "cpu":
+        print("[WARN] ⚠ Model is on CPU. This will be extremely slow for 8B models.")
+        print("[HINT] Use a GPU with sufficient VRAM or quantize the model.")
+    else:
+        print("[DEBUG] ✅ Model is on GPU.")
+
     eos_id = tokenizer.eos_token_id or tokenizer.pad_token_id
+    print(f"[DEBUG] EOS token ID: {eos_id}\n")
+
     return tokenizer, model, eos_id
 
 @torch.no_grad()
