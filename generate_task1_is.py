@@ -135,11 +135,14 @@ def topk_decode_ids(
     Output:
       gen_ids: List[int] of sampled token ids for the continuation.
     """
-    input_ids = tokenizer(prefix, return_tensors="pt").input_ids.to(model.device)
+    enc = tokenizer(prefix, return_tensors="pt", padding=True)
+    input_ids = enc.input_ids.to(model.device)
+    attention_mask = enc.attention_mask.to(model.device)
 
     # Use generate with top-k sampling
     output_ids = model.generate(
         input_ids,
+        attention_mask=attention_mask,
         do_sample=True,
         top_k=k,
         max_new_tokens=max_new,
