@@ -11,6 +11,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 # Import the fast trigram API
 from api import FastRewardCalculator
 
+
 def load_counts_and_reward(counts_dir: str, epsilon: float = 1e-9) -> FastRewardCalculator:
     """Initialize trigram-based reward calculator for Sequential Importance Sampling.
     
@@ -23,6 +24,7 @@ def load_counts_and_reward(counts_dir: str, epsilon: float = 1e-9) -> FastReward
     """
     cache_file = os.path.join(counts_dir, "trigram_probs.pkl")
     return FastRewardCalculator(cache_file, epsilon=epsilon)
+
 
 def reward_sum_pos_ids(reward_calc: FastRewardCalculator, tokenizer, ids: List[int]) -> float:
     """Compute positive reward on token ids: R_sum over token trigrams.
@@ -43,6 +45,7 @@ def reward_sum_pos_ids(reward_calc: FastRewardCalculator, tokenizer, ids: List[i
     # Compute reward (already normalized inside FastRewardCalculator)
     return reward_calc.calculate_reward_tokens(tokens, normalize=True)
 
+
 def load_model(model_name: str, hf_token: str, device: str) -> Tuple[AutoTokenizer, AutoModelForCausalLM, int]:
     """Load and configure Hugging Face model components for Sequential Importance Sampling.
     
@@ -61,58 +64,53 @@ def load_model(model_name: str, hf_token: str, device: str) -> Tuple[AutoTokeniz
     print(f"[DEBUG] Target device: {device}")
 
     # === Tokenizer ===
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name,
-        use_auth_token=hf_token
-    )
+    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     # === Check CUDA availability ===
     if torch.cuda.is_available():
         print("[DEBUG] CUDA is available ✅")
-        print(f"[DEBUG] CUDA device count: {torch.cuda.device_count()}")
-        print(f"[DEBUG] Using device: {torch.cuda.current_device()}")
-        print(f"[DEBUG] Device name: {torch.cuda.get_device_name(0)}")
-        print(f"[DEBUG] Memory allocated (MB): {torch.cuda.memory_allocated(0)/1e6:.2f}")
-        print(f"[DEBUG] Memory reserved (MB): {torch.cuda.memory_reserved(0)/1e6:.2f}")
+        print(f"[DEBUG] Using device: {torch.cuda.get_device_name(0)}")
     else:
         print("[DEBUG] ❌ CUDA not available — will run on CPU. This may be very slow.")
 
-    # === Model ===
-    if "cuda" in device and torch.cuda.is_available():
-        print("[DEBUG] Loading model in float16 with device_map='auto' ...")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            use_auth_token=hf_token,
-            torch_dtype=torch.float16,
-            device_map="auto",
-            low_cpu_mem_usage=True
-        )
+    # === Choose dtype intelligently ===
+    if torch.cuda.is_available():
+        cap = torch.cuda.get_device_capability(0)
+        if cap[0] >= 8:  # Ampere or newer (T4/L4/A100 etc.)
+            dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        else:
+            dtype = torch.float16
     else:
-        print("[DEBUG] Loading model on CPU (float32) ...")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            use_auth_token=hf_token,
-            torch_dtype=torch.float32
-        )
-        model.to("cpu")
+        dtype = torch.float32
+
+    print(f"[DEBUG] Using dtype: {dtype}")
+
+    # === Model ===
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        token=hf_token,
+        torch_dtype=dtype,
+        device_map="auto" if torch.cuda.is_available() else None,
+        low_cpu_mem_usage=True
+    )
 
     model.eval()
+    eos_id = tokenizer.eos_token_id or tokenizer.pad_token_id
 
     # === Post-load sanity check ===
     actual_device = next(model.parameters()).device
-    print(f"[DEBUG] Model successfully loaded on: {actual_device}")
-    if actual_device.type == "cpu":
-        print("[WARN] ⚠ Model is on CPU. This will be extremely slow for 8B models.")
-        print("[HINT] Use a GPU with sufficient VRAM or quantize the model.")
-    else:
-        print("[DEBUG] ✅ Model is on GPU.")
-
-    eos_id = tokenizer.eos_token_id or tokenizer.pad_token_id
+    print(f"[DEBUG] Model loaded on: {actual_device}")
     print(f"[DEBUG] EOS token ID: {eos_id}\n")
 
+    # === Optional CUDA performance flags ===
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+
     return tokenizer, model, eos_id
+
 
 @torch.no_grad()
 def topk_decode_ids(
@@ -135,30 +133,30 @@ def topk_decode_ids(
     Output:
       gen_ids: List[int] of sampled token ids for the continuation.
     """
-    enc = tokenizer(prefix, return_tensors="pt", padding=True)
+    enc = tokenizer(prefix, return_tensors="pt", padding=True, truncation=True)
     input_ids = enc.input_ids.to(model.device)
     attention_mask = enc.attention_mask.to(model.device)
 
-    # Use generate with top-k sampling
     output_ids = model.generate(
-        input_ids,
+        input_ids=input_ids,
         attention_mask=attention_mask,
         do_sample=True,
         top_k=k,
+        temperature=1.0,
         max_new_tokens=max_new,
         pad_token_id=tokenizer.eos_token_id,
-        eos_token_id=eos_id
+        eos_token_id=eos_id,
+        use_cache=True
     )[0]
 
-    # Remove prefix part, keep only continuation
     continuation_ids = output_ids[len(input_ids[0]):].tolist()
 
-    # If EOS is present, truncate after EOS
     if eos_id in continuation_ids:
         continuation_ids = continuation_ids[:continuation_ids.index(eos_id)]
 
     return continuation_ids
-   
+
+
 def importance_sampling_for_prompt(
     tokenizer: AutoTokenizer,
     model: AutoModelForCausalLM,
@@ -191,15 +189,14 @@ def importance_sampling_for_prompt(
         "normalized_weights": [float, ...]   # length K
       }
     """
-    samples = []
-    weights = []
+    samples, weights = [], []
 
-    # Sample K continuations using top-k
-    for _ in range(K):
+    prefix_ids = tokenizer(prefix, return_tensors="pt").input_ids[0].tolist()
+
+    for i in range(K):
         continuation_ids = topk_decode_ids(tokenizer, model, prefix, max_new_tokens, k, eos_id)
-        full_ids = tokenizer(prefix, return_tensors="pt").input_ids[0].tolist() + continuation_ids
+        full_ids = prefix_ids + continuation_ids
 
-        # compute reward
         R_x = reward_sum_pos_ids(reward_calc, tokenizer, full_ids)
         w = math.exp(beta * R_x)
 
@@ -207,7 +204,9 @@ def importance_sampling_for_prompt(
         samples.append({"text": text_continuation, "weight": w})
         weights.append(w)
 
-    # Normalize weights
+        if (i + 1) % 5 == 0:
+            print(f"[DEBUG] Generated {i+1}/{K} samples ...")
+
     total_w = sum(weights) if sum(weights) > 0 else 1.0
     normalized_weights = [w / total_w for w in weights]
 
