@@ -67,35 +67,17 @@ def _load_model(model_name: str, hf_token: str, device: str):
     Returns:
         Tuple[AutoTokenizer, AutoModelForCausalLM]: Configured tokenizer and model
     """
-    # === TOKENIZER LOADING ===
-    print(f"\n[DEBUG] Loading model: {model_name}")
-    print(f"[DEBUG] Target device: {device}")
-
-    # === Tokenizer ===
     tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
-    # === Check CUDA availability ===
-    if torch.cuda.is_available():
-        print("[DEBUG] CUDA is available ✅")
-        print(f"[DEBUG] Using device: {torch.cuda.get_device_name(0)}")
-    else:
-        print("[DEBUG] ❌ CUDA not available — will run on CPU. This may be very slow.")
-
-    # === Choose dtype intelligently ===
     if torch.cuda.is_available():
         cap = torch.cuda.get_device_capability(0)
-        if cap[0] >= 8:  # Ampere or newer (T4/L4/A100 etc.)
+        if cap[0] >= 8:  
             dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         else:
             dtype = torch.float16
     else:
         dtype = torch.float32
-
-    print(f"[DEBUG] Using dtype: {dtype}")
-
-    # === Model ===
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         token=hf_token,
@@ -105,14 +87,6 @@ def _load_model(model_name: str, hf_token: str, device: str):
     )
 
     model.eval()
-    eos_id = tokenizer.eos_token_id or tokenizer.pad_token_id
-
-    # === Post-load sanity check ===
-    actual_device = next(model.parameters()).device
-    print(f"[DEBUG] Model loaded on: {actual_device}")
-    print(f"[DEBUG] EOS token ID: {eos_id}\n")
-
-    # === Optional CUDA performance flags ===
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
