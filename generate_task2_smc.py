@@ -40,7 +40,7 @@ def load_model(model_name: str, hf_token: str, device: str) -> Tuple[AutoTokeniz
     """
     raise NotImplementedError("Students must implement this function.")
 
-def cal_intermediate_target_dist(reward_calc: FastRewardCalculator, tokenizer, full_ids: List[int]) -> float:
+def cal_intermediate_target_dist(reward_calc: FastRewardCalculator, tokenizer, beta: float, full_ids: List[int]) -> float:
     """
     Args:
         reward_calc: FastRewardCalculator (token_lm.logp available).

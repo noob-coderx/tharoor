@@ -35,7 +35,7 @@ def reward_sum_pos_ids(reward_calc: FastRewardCalculator, tokenizer, ids: List[i
         ids: full scored context (prompt+continuation) token ids.
 
     Output:
-        R_sum (float). If len(ids) < 3, return 0.0.
+        R_sum (float).
     """
     if len(ids) < 3:
         return 0.0

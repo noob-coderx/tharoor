@@ -38,7 +38,7 @@ def load_model(model_name: str, hf_token: str, device: str) -> Tuple[AutoTokeniz
     """
     raise NotImplementedError("Students must implement this function.")
 
-def cal_intermediate_target_dist(reward_calc: FastRewardCalculator, tokenizer, full_ids: List[int]) -> float:
+def cal_intermediate_target_dist(reward_calc: FastRewardCalculator, tokenizer, beta: float, full_ids: List[int]) -> float:
     """
     Args:
         reward_calc: FastRewardCalculator (token_lm.logp available).
@@ -50,7 +50,7 @@ def cal_intermediate_target_dist(reward_calc: FastRewardCalculator, tokenizer, f
     """
     raise NotImplementedError("Students must implement this function.")
 
-def cal_twist_function(reward_calc: FastRewardCalculator, tokenizer, seq_ids: List[int]) -> float:
+def cal_twist_function(reward_calc: FastRewardCalculator, tokenizer, beta: float, seq_ids: List[int]) -> float:
     """
     Inputs:
         reward_calc: FastRewardCalculator with token_lm access.
@@ -58,7 +58,7 @@ def cal_twist_function(reward_calc: FastRewardCalculator, tokenizer, seq_ids: Li
         seq_ids: current full context ids (prompt + generated).
 
     Returns:
-        Expected positive delta (float) ≥ 0. For t < 2, you may return 0.0.
+        Expected positive delta (float) ≥ 0.
         
     Note:
         you are allowed to define additional helper functions if needed in FastRewardCalculator class for calculation of expectation.
